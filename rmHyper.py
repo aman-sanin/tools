@@ -36,7 +36,7 @@ def process_all_pdfs_in_folder(folder_path):
             remove_hyperlinks(file_path)
 
 # Specify the folder path
-folder_path = "C:\\my\\file\\path"
+folder_path = "/home/zero/Documents/College/Latex/"
 
 # Call the function to process all PDFs in the folder
 process_all_pdfs_in_folder(folder_path)
