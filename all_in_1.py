@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 import sys
 
-class AllInOneKTUScraper:
+class KTUNotesDownloader:
     def __init__(self, download_dir="KTU_Notes"):
         self.base_url = "https://www.ktunotes.in"
         self.download_dir = Path(download_dir)
@@ -27,8 +27,6 @@ class AllInOneKTUScraper:
         }
         self.session.headers.update(headers)
     
-    # ==================== IMPROVED DOWNLOAD FUNCTIONS ====================
-    
     def extract_file_id(self, url):
         """Extract Google Drive file ID from URL"""
         patterns = [
@@ -46,21 +44,16 @@ class AllInOneKTUScraper:
     def get_drive_filename(self, file_id):
         """Try to get the original filename from Google Drive"""
         try:
-            # Get the view page to extract filename
             view_url = f"https://drive.google.com/file/d/{file_id}/view"
             response = self.session.get(view_url, timeout=10)
-            
-            # Look for the title in the HTML
             soup = BeautifulSoup(response.content, 'html.parser')
             
             # Method 1: Look for title tag
             title_tag = soup.find('title')
             if title_tag:
                 title = title_tag.text.strip()
-                # Title format is usually "filename - Google Drive"
                 if ' - Google Drive' in title:
                     filename = title.replace(' - Google Drive', '').strip()
-                    # Clean the filename
                     filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
                     if filename.endswith('.pdf') or '.pdf' in filename.lower():
                         return filename
@@ -83,41 +76,33 @@ class AllInOneKTUScraper:
     
     def extract_module_info_from_context(self, html_content, file_id, link_text=""):
         """Extract module information from context for better filename"""
-        # Try different methods to get module number
-        
-        # Method 1: Look for module patterns near the file_id
         idx = html_content.find(file_id)
         if idx != -1:
-            # Look around the file_id (200 chars before, 100 chars after)
             context_start = max(0, idx - 300)
             context_end = min(len(html_content), idx + 150)
             context = html_content[context_start:context_end]
             
-            # Common module patterns
             module_patterns = [
-                r'Module\s*[:\-]?\s*(\d+)[^<]*',  # Module 1, Module: 1, Module-1
-                r'Mod\s*[:\-]?\s*(\d+)[^<]*',     # Mod 1, Mod: 1, Mod-1
-                r'M\s*[:\-]?\s*(\d+)[^<]*',       # M1, M:1, M-1
-                r'MODULE\s*[:\-]?\s*(\d+)[^<]*',  # MODULE 1
-                r'Module\s*([IVXivx]+)[^<]*',     # Module I, Module II
-                r'Mod\s*([IVXivx]+)[^<]*',        # Mod I, Mod II
+                r'Module\s*[:\-]?\s*(\d+)[^<]*',
+                r'Mod\s*[:\-]?\s*(\d+)[^<]*',
+                r'M\s*[:\-]?\s*(\d+)[^<]*',
+                r'MODULE\s*[:\-]?\s*(\d+)[^<]*',
+                r'Module\s*([IVXivx]+)[^<]*',
+                r'Mod\s*([IVXivx]+)[^<]*',
             ]
             
             for pattern in module_patterns:
                 match = re.search(pattern, context, re.IGNORECASE)
                 if match:
                     module_num = match.group(1)
-                    # Convert Roman numerals to numbers if needed
                     roman_map = {'I': '1', 'II': '2', 'III': '3', 'IV': '4', 'V': '5',
                                  'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5'}
                     module_num = roman_map.get(module_num.upper(), module_num)
                     return f"Module_{module_num.zfill(2)}"
         
-        # Method 2: Check link text
         if link_text:
             link_lower = link_text.lower()
             if 'module' in link_lower or 'mod' in link_lower:
-                # Extract number from link text
                 num_match = re.search(r'(\d+|i{1,3}|iv|v)', link_text, re.IGNORECASE)
                 if num_match:
                     module_num = num_match.group(1)
@@ -129,7 +114,7 @@ class AllInOneKTUScraper:
         return None
     
     def download_drive_pdf(self, url, save_path, context_html="", link_text=""):
-        """Download PDF from Google Drive link with better filename"""
+        """Download PDF from Google Drive link"""
         file_id = self.extract_file_id(url)
         
         if not file_id:
@@ -139,72 +124,47 @@ class AllInOneKTUScraper:
         download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
         
         try:
-            # First request
             response = self.session.get(download_url, stream=True, timeout=30)
             
-            # Check for warning page
             if "Google Drive - Virus scan warning" in response.text:
-                # Extract confirm token
                 confirm_match = re.search(r'confirm=([a-zA-Z0-9_-]+)', response.text)
                 if confirm_match:
                     confirm_token = confirm_match.group(1)
                     download_url = f"{download_url}&confirm={confirm_token}"
                     response = self.session.get(download_url, stream=True, timeout=30)
             
-            # Try to get content-disposition for original filename
             content_disposition = response.headers.get('content-disposition', '')
             original_filename = None
             
             if 'filename=' in content_disposition:
-                # Extract filename from content-disposition
                 filename_match = re.search(r'filename\*?=["\']?(?:UTF-8[\'"]*)?([^"\';]+)', content_disposition, re.IGNORECASE)
                 if filename_match:
                     original_filename = unquote(filename_match.group(1))
                 else:
-                    # Fallback to simpler extraction
                     filename_match = re.search(r'filename=["\']?([^"\']+)["\']?', content_disposition, re.IGNORECASE)
                     if filename_match:
                         original_filename = filename_match.group(1)
             
-            # If no content-disposition, try to get from Google Drive page
             if not original_filename:
                 original_filename = self.get_drive_filename(file_id)
             
-            # If we have an original filename, use it
             if original_filename:
-                # Clean the filename
                 original_filename = unquote(original_filename)
-                # Remove .pdf.pdf if present
                 original_filename = re.sub(r'\.pdf\.pdf$', '.pdf', original_filename, flags=re.IGNORECASE)
-                # Ensure it ends with .pdf
                 if not original_filename.lower().endswith('.pdf'):
                     original_filename += '.pdf'
-                # Clean invalid characters
                 original_filename = re.sub(r'[<>:"/\\|?*]', '_', original_filename)
                 filename = original_filename
             else:
-                # Try to get module info for better naming
                 module_info = self.extract_module_info_from_context(context_html, file_id, link_text)
                 if module_info:
                     filename = f"{module_info}.pdf"
                 else:
-                    # Generate a meaningful name based on current filename
-                    current_name = Path(save_path).name
-                    name_without_ext = Path(save_path).stem
-                    # If it's already Document_XX, keep it
-                    if name_without_ext.startswith('Document_'):
-                        filename = current_name
-                    else:
-                        # Otherwise create a sequential name
-                        filename = f"Document_{int(time.time()) % 10000}.pdf"
+                    filename = f"Document_{int(time.time()) % 10000}.pdf"
             
-            # Update save_path with new filename
             new_save_path = Path(save_path).parent / filename
-            
-            # Ensure directory exists
             os.makedirs(os.path.dirname(new_save_path), exist_ok=True)
             
-            # Save the file
             with open(new_save_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -213,7 +173,6 @@ class AllInOneKTUScraper:
             file_size = os.path.getsize(new_save_path)
             print(f"    ✅ Downloaded: {filename} ({file_size:,} bytes)")
             
-            # Check if it's a valid PDF
             try:
                 with open(new_save_path, 'rb') as f:
                     header = f.read(4)
@@ -223,14 +182,14 @@ class AllInOneKTUScraper:
             except:
                 pass
             
-            return new_save_path  # Return the new path with better filename
+            return new_save_path
             
         except Exception as e:
             print(f"❌ Error downloading {url}: {e}")
             return False
     
     def get_subject_links(self, semester_url):
-        """Extract ALL subject links from a semester page including all subjects"""
+        """Extract ALL subject links from a semester page"""
         try:
             print(f"\n🔍 Fetching subjects from: {semester_url}")
             response = self.session.get(semester_url, timeout=15)
@@ -239,32 +198,22 @@ class AllInOneKTUScraper:
             
             subject_links = []
             
-            # Method 1: Look for ALL elementor-button links (ALL subjects including fa-book-open)
             buttons = soup.find_all('a', class_='elementor-button')
-            
             for button in buttons:
                 href = button.get('href')
                 if href:
-                    # Check if it's a notes link - broader check
                     if '/ktu-' in href and ('-notes-' in href or 'notes/' in href):
-                        # Extract subject name from button text
                         text_element = button.find('span', class_='elementor-button-text')
                         if text_element:
                             subject_name = text_element.get_text(strip=True)
-                            
-                            # Clean subject name
                             subject_name = re.sub(r'[<>:"/\\|?*&]', '_', subject_name)
                             subject_name = re.sub(r'\s+', ' ', subject_name).strip()
-                            
-                            # Filter out non-subject buttons (but keep ALL actual subjects)
                             exclude_keywords = ['CURRICULUM', 'SYLLABUS', 'QUESTION PAPER', 'EXAM', 'TIMETABLE']
                             if (len(subject_name) > 5 and 
                                 not any(keyword in subject_name.upper() for keyword in exclude_keywords)):
                                 full_url = urljoin(semester_url, href)
                                 subject_links.append((full_url, subject_name))
             
-            # Method 2: Also look for any links that might be subjects in the main content
-            # This catches any subjects that might be missed by method 1
             content_sections = soup.select('.elementor-widget-wrap, .elementor-section')
             for section in content_sections:
                 links = section.find_all('a', href=True)
@@ -272,21 +221,17 @@ class AllInOneKTUScraper:
                     href = link.get('href')
                     text = link.get_text(strip=True)
                     
-                    # Look for subject links (more flexible)
                     if (href and text and len(text) > 5 and
                         ('/ktu-' in href or 'notes' in href.lower()) and
                         not any(excl in text.upper() for excl in ['CURRICULUM', 'SYLLABUS', 'QUESTION'])):
                         
-                        # Check if it looks like a subject name
                         if not any(term in text.lower() for term in ['home', 'about', 'contact', 'privacy']):
                             full_url = urljoin(semester_url, href)
-                            # Check if we already have this URL
                             if not any(url == full_url for url, _ in subject_links):
                                 clean_name = re.sub(r'[<>:"/\\|?*&]', '_', text)
                                 clean_name = re.sub(r'\s+', ' ', clean_name).strip()
                                 subject_links.append((full_url, clean_name))
             
-            # Remove duplicates while preserving order
             seen = set()
             unique_links = []
             for link_url, link_text in subject_links:
@@ -310,8 +255,6 @@ class AllInOneKTUScraper:
             
             drive_links = []
             
-            # Find all Google Drive links with their context
-            # Look for links in the HTML
             for link in soup.find_all('a', href=True):
                 href = link['href']
                 link_text = link.get_text(strip=True)
@@ -320,11 +263,9 @@ class AllInOneKTUScraper:
                     file_id = self.extract_file_id(href)
                     if file_id:
                         drive_url = f"https://drive.google.com/file/d/{file_id}/view"
-                        # Check if we already have this file_id
                         if not any(fid == file_id for _, fid, _ in drive_links):
                             drive_links.append((drive_url, file_id, link_text))
             
-            # Also search in raw text for drive links
             patterns = [
                 r'drive\.google\.com/file/d/([a-zA-Z0-9_-]+)',
                 r'drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)',
@@ -336,11 +277,9 @@ class AllInOneKTUScraper:
                 for file_id in matches:
                     drive_url = f"https://drive.google.com/file/d/{file_id}/view"
                     if not any(fid == file_id for _, fid, _ in drive_links):
-                        # Try to find link text near this file_id
                         link_text = ""
                         idx = html_content.find(file_id)
                         if idx != -1:
-                            # Look for nearby text
                             start = max(0, idx - 150)
                             end = min(len(html_content), idx + 150)
                             context = html_content[start:end]
@@ -357,100 +296,11 @@ class AllInOneKTUScraper:
             print(f"❌ Error finding drive links on {url}: {e}")
             return [], ""
     
-    # ==================== PDF PROCESSING FUNCTIONS ====================
-    
-    def remove_part_from_filename(self, file_path):
-        """Remove ktunotes patterns from filename"""
-        directory = os.path.dirname(file_path)
-        filename = os.path.basename(file_path)
-        
-        # Patterns to remove
-        patterns_to_remove = [
-            r' - Ktunotes\.in',
-            r' - ktunotes\.in',
-            r' -ktunotes\.in',
-            r' - KTUnotes',
-            r' - ktunotes',
-            r'_Ktunotes\.in',
-            r'_ktunotes\.in',
-            r'\(Ktunotes\.in\)',
-            r'\(ktunotes\.in\)',
-        ]
-        
-        new_filename = filename
-        for pattern in patterns_to_remove:
-            new_filename = re.sub(pattern, '', new_filename, flags=re.IGNORECASE)
-        
-        # Remove extra spaces and clean up
-        new_filename = re.sub(r'\s+', ' ', new_filename).strip()
-        new_filename = re.sub(r'\.pdf\.pdf$', '.pdf', new_filename, flags=re.IGNORECASE)
-        
-        if new_filename != filename:
-            new_file_path = os.path.join(directory, new_filename)
-            
-            # Avoid overwriting
-            counter = 1
-            while os.path.exists(new_file_path):
-                name_part, ext = os.path.splitext(new_filename)
-                new_filename = f"{name_part}_{counter}{ext}"
-                new_file_path = os.path.join(directory, new_filename)
-                counter += 1
-            
-            os.rename(file_path, new_file_path)
-            print(f"    📝 Renamed: {filename} → {new_filename}")
-            return new_file_path
-        
-        return file_path
-    
-    def remove_hyperlinks_from_pdf(self, file_path):
-        """Remove hyperlinks from PDF"""
-        try:
-            doc = fitz.open(file_path)
-            modified = False
-            
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-                links = page.get_links()
-                
-                for link in links:
-                    page.delete_link(link)
-                    modified = True
-            
-            if modified:
-                temp_pdf = file_path + '.tmp'
-                doc.save(temp_pdf)
-                doc.close()
-                os.replace(temp_pdf, file_path)
-                print(f"    🔗 Removed hyperlinks from: {os.path.basename(file_path)}")
-            else:
-                doc.close()
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error removing hyperlinks: {e}")
-            return False
-    
-    def process_pdf_file(self, file_path, options):
-        """Process a single PDF file"""
-        filename = os.path.basename(file_path)
-        
-        if options.get('rename', False):
-            file_path = self.remove_part_from_filename(file_path)
-        
-        if options.get('remove_hyperlinks', False):
-            self.remove_hyperlinks_from_pdf(file_path)
-        
-        return file_path
-    
-    # ==================== MAIN SCRAPER FUNCTION ====================
-    
-    def scrape_subject(self, subject_url, subject_name, subject_dir, options):
-        """Scrape a subject page with proper filenames"""
+    def scrape_subject(self, subject_url, subject_name, subject_dir):
+        """Scrape a subject page and download PDFs"""
         print(f"\n📚 Processing: {subject_name}")
         print(f"   🔗 URL: {subject_url}")
         
-        # Get drive links with context
         drive_links, html_content = self.find_drive_links_on_page(subject_url)
         
         if not drive_links:
@@ -463,96 +313,50 @@ class AllInOneKTUScraper:
         for i, (drive_url, file_id, link_text) in enumerate(drive_links, 1):
             print(f"   📥 Processing link {i}/{len(drive_links)}")
             
-            # Create initial filename (will be improved during download)
             module_info = self.extract_module_info_from_context(html_content, file_id, link_text)
             if module_info:
                 filename = f"{module_info}.pdf"
             else:
                 filename = f"Document_{i:02d}.pdf"
             
-            # Clean filename
             filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            
-            # Full save path
             save_path = os.path.join(subject_dir, filename)
             
-            # Check if file already exists
             if os.path.exists(save_path):
                 print(f"   ⏭️  Skipping (already exists): {filename}")
-                
-                # Process existing file
-                if options.get('rename', False) or options.get('remove_hyperlinks', False):
-                    self.process_pdf_file(save_path, options)
+                downloaded_count += 1
                 continue
             
-            # Download with delay
             time.sleep(1.5)
             
-            # Download with improved filename handling
             result = self.download_drive_pdf(drive_url, save_path, html_content, link_text)
             
             if result:
-                if isinstance(result, str):  # New path returned
-                    save_path = result
                 downloaded_count += 1
-                
-                # Process the downloaded file
-                self.process_pdf_file(save_path, options)
         
         return downloaded_count
     
-    # ==================== INTERACTIVE RUNNER ====================
-    
-    def get_processing_options(self):
-        """Get PDF processing options"""
-        print("\n" + "-"*60)
-        print("⚙️  PDF PROCESSING OPTIONS")
-        print("-"*60)
-        
-        options = {}
-        
-        rename_choice = input("Remove 'Ktunotes.in' from filenames? (yes/no, default: yes): ").strip().lower()
-        options['rename'] = rename_choice in ['yes', 'y', '']
-        
-        hyperlinks_choice = input("Remove hyperlinks from PDFs? (yes/no, default: no): ").strip().lower()
-        options['remove_hyperlinks'] = hyperlinks_choice in ['yes', 'y']
-        
-        return options
-    
-    def run(self):
-        """Main interactive runner"""
+    def run_downloader(self):
+        """Run the downloader module"""
         print("\n" + "="*60)
-        print("🎓 IMPROVED KTU NOTES DOWNLOADER")
-        print("   Now with proper filenames and ALL subjects!")
+        print("🎓 KTU NOTES DOWNLOADER")
         print("="*60)
         
-        # Get semester URL
         default_url = "https://www.ktunotes.in/ktu-s6-cse-notes-2019-scheme/"
         url_input = input(f"\nEnter semester URL (default: {default_url}): ").strip()
         semester_url = url_input if url_input else default_url
         
-        # Get download location - ACCEPTS FULL PATHS
         default_dir = "KTU_Notes"
-        dir_prompt = f"\nEnter download folder name or full path\nExamples:\n"
-        dir_prompt += f"  • Folder name: '{default_dir}' (creates in current directory)\n"
-        dir_prompt += f"  • Full path: 'C:\\Users\\Name\\Documents\\KTU' or '/home/user/KTU'\n"
-        dir_prompt += f"Download location (default: {default_dir}): "
-        
+        dir_prompt = f"\nEnter download folder name or full path (default: {default_dir}): "
         dir_input = input(dir_prompt).strip()
         download_dir = dir_input if dir_input else default_dir
         
-        # Handle full paths
         self.download_dir = Path(download_dir)
         if not self.download_dir.is_absolute():
-            # If it's a relative path, make it absolute relative to current directory
             self.download_dir = Path.cwd() / self.download_dir
         
         print(f"\n📁 Download location: {self.download_dir.absolute()}")
         
-        # Get processing options
-        options = self.get_processing_options()
-        
-        # Get subject links - NOW INCLUDES ALL SUBJECTS
         print("\n🔍 Fetching available subjects...")
         subject_links = self.get_subject_links(semester_url)
         
@@ -564,7 +368,6 @@ class AllInOneKTUScraper:
         for i, (url, name) in enumerate(subject_links, 1):
             print(f"  {i}. {name}")
         
-        # Subject selection
         print("\n" + "-"*60)
         print("📝 SUBJECT SELECTION")
         print("-"*60)
@@ -622,27 +425,16 @@ class AllInOneKTUScraper:
             print("❌ No subjects selected")
             return
         
-        # Show selection
         print(f"\n📋 SELECTED {len(selected_indices)} SUBJECT(S):")
         for idx in selected_indices:
             _, name = subject_links[idx]
             print(f"  • {name}")
         
-        print(f"\n⚙️  PROCESSING OPTIONS:")
-        if options['rename']:
-            print("  • Remove 'Ktunotes.in' from filenames: ✅ ENABLED")
-        if options['remove_hyperlinks']:
-            print("  • Remove hyperlinks from PDFs: ✅ ENABLED")
-        if not options['rename'] and not options['remove_hyperlinks']:
-            print("  • No processing selected (raw download)")
-        
-        # Confirm
         confirm = input("\nStart download? (yes/no): ").strip().lower()
         if confirm not in ['yes', 'y', '']:
             print("Download cancelled.")
             return
         
-        # Create main directory
         self.download_dir.mkdir(parents=True, exist_ok=True)
         
         print(f"\n" + "="*60)
@@ -657,15 +449,13 @@ class AllInOneKTUScraper:
             print(f"\n{'─'*40}")
             print(f"📚 Subject {i}/{len(selected_indices)}: {subject_name}")
             
-            # Create subject directory
             clean_name = re.sub(r'[<>:"/\\|?*&]', '_', subject_name)
             clean_name = re.sub(r'\s+', ' ', clean_name).strip()
             clean_name = clean_name[:80]
             subject_dir = self.download_dir / clean_name
             subject_dir.mkdir(parents=True, exist_ok=True)
             
-            # Scrape subject
-            downloaded = self.scrape_subject(subject_url, subject_name, subject_dir, options)
+            downloaded = self.scrape_subject(subject_url, subject_name, subject_dir)
             total_downloaded += downloaded
             
             print(f"   📊 Progress: {i}/{len(selected_indices)} subjects")
@@ -675,7 +465,6 @@ class AllInOneKTUScraper:
                 print(f"   ⏳ Waiting 2 seconds...")
                 time.sleep(2)
         
-        # Final summary
         print(f"\n{'='*60}")
         print("✅ DOWNLOAD COMPLETE!")
         print("="*60)
@@ -684,39 +473,308 @@ class AllInOneKTUScraper:
         print(f"  • Total files downloaded: {total_downloaded}")
         print(f"  • Location: {self.download_dir.absolute()}")
         print(f"{'='*60}")
+
+
+class PDFProcessor:
+    """Handles PDF post-processing: renaming and hyperlink removal"""
+    
+    @staticmethod
+    def rename_pdfs_in_directory(directory):
+        """Remove ktunotes patterns from PDF filenames in a directory"""
+        directory = Path(directory)
         
-        print(f"\n📁 FOLDER STRUCTURE:")
-        for item in sorted(self.download_dir.iterdir()):
-            if item.is_dir():
-                pdf_count = len([f for f in item.iterdir() if f.is_file() and f.suffix.lower() == '.pdf'])
-                if pdf_count > 0:
-                    print(f"  ├── {item.name}/ ({pdf_count} PDFs)")
+        if not directory.exists():
+            print(f"❌ Directory not found: {directory}")
+            return 0
         
-        print(f"\n🎉 Done! Files now have proper names!")
+        renamed_count = 0
+        patterns_to_remove = [
+            r' - Ktunotes\.in',
+            r' - ktunotes\.in',
+            r' -ktunotes\.in',
+            r' - KTUnotes',
+            r' - ktunotes',
+            r'_Ktunotes\.in',
+            r'_ktunotes\.in',
+            r'\(Ktunotes\.in\)',
+            r'\(ktunotes\.in\)',
+        ]
+        
+        for pdf_file in directory.rglob("*.pdf"):
+            try:
+                filename = pdf_file.name
+                new_filename = filename
+                
+                for pattern in patterns_to_remove:
+                    new_filename = re.sub(pattern, '', new_filename, flags=re.IGNORECASE)
+                
+                new_filename = re.sub(r'\s+', ' ', new_filename).strip()
+                new_filename = re.sub(r'\.pdf\.pdf$', '.pdf', new_filename, flags=re.IGNORECASE)
+                
+                if new_filename != filename:
+                    new_file_path = pdf_file.parent / new_filename
+                    
+                    counter = 1
+                    while new_file_path.exists():
+                        name_part, ext = os.path.splitext(new_filename)
+                        new_filename = f"{name_part}_{counter}{ext}"
+                        new_file_path = pdf_file.parent / new_filename
+                        counter += 1
+                    
+                    pdf_file.rename(new_file_path)
+                    print(f"    📝 Renamed: {filename} → {new_filename}")
+                    renamed_count += 1
+                    
+            except Exception as e:
+                print(f"❌ Error renaming {pdf_file.name}: {e}")
+        
+        return renamed_count
+    
+    @staticmethod
+    def remove_hyperlinks_from_pdf(file_path):
+        """Remove hyperlinks from a single PDF file"""
+        try:
+            doc = fitz.open(file_path)
+            modified = False
+            
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                links = page.get_links()
+                
+                for link in links:
+                    page.delete_link(link)
+                    modified = True
+            
+            if modified:
+                temp_pdf = str(file_path) + '.tmp'
+                doc.save(temp_pdf)
+                doc.close()
+                os.replace(temp_pdf, file_path)
+                print(f"    🔗 Removed hyperlinks from: {os.path.basename(file_path)}")
+                return True
+            else:
+                doc.close()
+                return False
+                
+        except Exception as e:
+            print(f"❌ Error removing hyperlinks from {file_path}: {e}")
+            return False
+    
+    @staticmethod
+    def process_directory(directory, rename=True, remove_hyperlinks=True):
+        """Process all PDFs in a directory"""
+        directory = Path(directory)
+        
+        if not directory.exists():
+            print(f"❌ Directory not found: {directory}")
+            return
+        
+        print(f"\n🔧 Processing PDFs in: {directory}")
+        
+        pdf_files = list(directory.rglob("*.pdf"))
+        if not pdf_files:
+            print("⚠️  No PDF files found in this directory")
+            return
+        
+        print(f"📄 Found {len(pdf_files)} PDF file(s)")
+        
+        processed_count = 0
+        renamed_count = 0
+        hyperlinks_removed = 0
+        
+        for pdf_file in pdf_files:
+            try:
+                print(f"\n   Processing: {pdf_file.name}")
+                
+                if rename:
+                    filename = pdf_file.name
+                    new_filename = filename
+                    patterns_to_remove = [
+                        r' - Ktunotes\.in', r' - ktunotes\.in', r' -ktunotes\.in',
+                        r' - KTUnotes', r' - ktunotes', r'_Ktunotes\.in',
+                        r'_ktunotes\.in', r'\(Ktunotes\.in\)', r'\(ktunotes\.in\)',
+                    ]
+                    
+                    for pattern in patterns_to_remove:
+                        new_filename = re.sub(pattern, '', new_filename, flags=re.IGNORECASE)
+                    
+                    new_filename = re.sub(r'\s+', ' ', new_filename).strip()
+                    new_filename = re.sub(r'\.pdf\.pdf$', '.pdf', new_filename, flags=re.IGNORECASE)
+                    
+                    if new_filename != filename:
+                        new_file_path = pdf_file.parent / new_filename
+                        
+                        counter = 1
+                        while new_file_path.exists():
+                            name_part, ext = os.path.splitext(new_filename)
+                            new_filename = f"{name_part}_{counter}{ext}"
+                            new_file_path = pdf_file.parent / new_filename
+                            counter += 1
+                        
+                        pdf_file.rename(new_file_path)
+                        print(f"      📝 Renamed: {filename} → {new_filename}")
+                        renamed_count += 1
+                        pdf_file = new_file_path
+                
+                if remove_hyperlinks:
+                    if PDFProcessor.remove_hyperlinks_from_pdf(pdf_file):
+                        hyperlinks_removed += 1
+                
+                processed_count += 1
+                
+            except Exception as e:
+                print(f"❌ Error processing {pdf_file.name}: {e}")
+        
+        print(f"\n{'='*60}")
+        print("✅ PROCESSING COMPLETE!")
+        print("="*60)
+        print(f"📊 Summary:")
+        print(f"  • PDF files processed: {processed_count}")
+        if rename:
+            print(f"  • Files renamed: {renamed_count}")
+        if remove_hyperlinks:
+            print(f"  • Hyperlinks removed from: {hyperlinks_removed} files")
+        print(f"{'='*60}")
+    
+    def run_processor(self):
+        """Run the PDF processor module"""
+        print("\n" + "="*60)
+        print("🔧 PDF POST-PROCESSOR")
+        print("="*60)
+        
+        dir_prompt = "\nEnter directory path containing PDFs: "
+        dir_input = input(dir_prompt).strip()
+        
+        if not dir_input:
+            print("❌ No directory specified.")
+            return
+        
+        directory = Path(dir_input)
+        if not directory.exists():
+            print(f"❌ Directory not found: {directory}")
+            return
+        
+        print("\n" + "-"*60)
+        print("⚙️  PROCESSING OPTIONS")
+        print("-"*60)
+        
+        rename_choice = input("Remove 'Ktunotes.in' from filenames? (yes/no, default: yes): ").strip().lower()
+        rename = rename_choice in ['yes', 'y', '']
+        
+        hyperlinks_choice = input("Remove hyperlinks from PDFs? (yes/no, default: no): ").strip().lower()
+        remove_hyperlinks = hyperlinks_choice in ['yes', 'y']
+        
+        if not rename and not remove_hyperlinks:
+            print("⚠️  No processing options selected. Nothing to do.")
+            return
+        
+        print(f"\n📁 Directory: {directory.absolute()}")
+        print(f"⚙️  Options:")
+        if rename:
+            print("  • Rename files: ✅ ENABLED")
+        if remove_hyperlinks:
+            print("  • Remove hyperlinks: ✅ ENABLED")
+        
+        confirm = input("\nStart processing? (yes/no): ").strip().lower()
+        if confirm not in ['yes', 'y', '']:
+            print("Processing cancelled.")
+            return
+        
+        self.process_directory(directory, rename, remove_hyperlinks)
+
+
+class AllInOneKTUScraper:
+    """Main orchestrator that combines downloader and processor"""
+    
+    @staticmethod
+    def main_menu():
+        """Display main menu and handle user choice"""
+        print("\n" + "="*60)
+        print("🎓 KTU NOTES MANAGER")
+        print("="*60)
+        print("\nWhat would you like to do?")
+        print("1. 📥 Download KTU Notes")
+        print("2. 🔧 Process Existing PDFs (Rename & Remove Hyperlinks)")
+        print("3. 📥 + 🔧 Download AND Process")
+        print("4. 🚪 Exit")
+        
+        while True:
+            choice = input("\nEnter your choice (1-4): ").strip()
+            
+            if choice == '1':
+                # Download only
+                downloader = KTUNotesDownloader()
+                downloader.run_downloader()
+                break
+                
+            elif choice == '2':
+                # Process only
+                processor = PDFProcessor()
+                processor.run_processor()
+                break
+                
+            elif choice == '3':
+                # Download and process
+                print("\n" + "="*60)
+                print("📥 + 🔧 DOWNLOAD AND PROCESS")
+                print("="*60)
+                
+                # Step 1: Download
+                print("\n📥 STEP 1: DOWNLOADING")
+                print("-"*40)
+                downloader = KTUNotesDownloader()
+                downloader.run_downloader()
+                
+                # Step 2: Ask for processing options
+                print("\n" + "="*60)
+                print("🔧 STEP 2: POST-PROCESSING")
+                print("="*60)
+                
+                process_dir = input(f"\nEnter directory to process (default: {downloader.download_dir}): ").strip()
+                if not process_dir:
+                    process_dir = downloader.download_dir
+                
+                processor = PDFProcessor()
+                
+                print("\n" + "-"*60)
+                print("⚙️  PROCESSING OPTIONS")
+                print("-"*60)
+                
+                rename_choice = input("Remove 'Ktunotes.in' from filenames? (yes/no, default: yes): ").strip().lower()
+                rename = rename_choice in ['yes', 'y', '']
+                
+                hyperlinks_choice = input("Remove hyperlinks from PDFs? (yes/no, default: no): ").strip().lower()
+                remove_hyperlinks = hyperlinks_choice in ['yes', 'y']
+                
+                if rename or remove_hyperlinks:
+                    confirm = input("\nStart post-processing? (yes/no): ").strip().lower()
+                    if confirm in ['yes', 'y', '']:
+                        processor.process_directory(process_dir, rename, remove_hyperlinks)
+                else:
+                    print("⚠️  No processing options selected. Skipping post-processing.")
+                
+                break
+                
+            elif choice == '4':
+                print("\n👋 Goodbye!")
+                sys.exit(0)
+                
+            else:
+                print("❌ Invalid choice. Please enter 1, 2, 3, or 4.")
+
 
 def main():
-    print("\n🎓 KTU NOTES DOWNLOADER - IMPROVED VERSION")
-    print("   Fixes: All subjects + Better filenames + Full paths support\n")
+    print("\n🎓 KTU NOTES MANAGER - MODULAR VERSION")
+    print("   Downloader and PDF Processor\n")
     
-    # Check dependencies
+    # Check for PyMuPDF
     try:
         import fitz
     except ImportError:
-        print("⚠️  PyMuPDF not installed. Hyperlink removal disabled.")
+        print("⚠️  PyMuPDF not installed. Hyperlink removal will be disabled.")
         print("   Install: pip install PyMuPDF")
     
-    scraper = AllInOneKTUScraper()
-    
-    try:
-        scraper.run()
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user.")
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-
-if __name__ == "__main__":
+    # Check for required packages
     try:
         import requests
         from bs4 import BeautifulSoup
@@ -727,4 +785,17 @@ if __name__ == "__main__":
         print("Packages installed. Please run again.")
         sys.exit(0)
     
+    # Run the main menu
+    while True:
+        AllInOneKTUScraper.main_menu()
+        
+        # Ask if user wants to do another operation
+        another = input("\nPerform another operation? (yes/no): ").strip().lower()
+        if another not in ['yes', 'y', '']:
+            print("\n👋 Goodbye!")
+            break
+        print("\n" + "="*60 + "\n")
+
+
+if __name__ == "__main__":
     main()
