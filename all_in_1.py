@@ -511,6 +511,8 @@ class PDFProcessor:
                 r'_ktunotes\.in',
                 r'\(Ktunotes\.in\)',
                 r'\(ktunotes\.in\)',
+                r'\s+Ktunotes\.in',
+                r'\s+ktunotes\.in',
             ]
             
             for pattern in patterns_to_remove:
