@@ -296,7 +296,7 @@ class KTUNotesDownloader:
             print(f"❌ Error finding drive links on {url}: {e}")
             return [], ""
     
-    def scrape_subject(self, subject_url, subject_name, subject_dir):
+    def scrape_subject(self, subject_url, subject_name, subject_dir, process_after=False, processor_options=None):
         """Scrape a subject page and download PDFs"""
         print(f"\n📚 Processing: {subject_name}")
         print(f"   🔗 URL: {subject_url}")
@@ -334,10 +334,17 @@ class KTUNotesDownloader:
             if result:
                 downloaded_count += 1
         
+        # Process after download if requested
+        if process_after and downloaded_count > 0 and processor_options:
+            from PDFProcessor import PDFProcessor  # Import here to avoid circular dependency
+            processor = PDFProcessor()
+            print(f"\n   🔧 Processing downloaded files in: {subject_dir}")
+            processor.process_single_directory(subject_dir, **processor_options)
+        
         return downloaded_count
     
-    def run_downloader(self):
-        """Run the downloader module"""
+    def run_downloader(self, process_after=False, processor_options=None):
+        """Run the downloader module with optional post-processing"""
         print("\n" + "="*60)
         print("🎓 KTU NOTES DOWNLOADER")
         print("="*60)
@@ -430,6 +437,9 @@ class KTUNotesDownloader:
             _, name = subject_links[idx]
             print(f"  • {name}")
         
+        if process_after:
+            print(f"\n⚙️  POST-PROCESSING: Will process each folder after download")
+        
         confirm = input("\nStart download? (yes/no): ").strip().lower()
         if confirm not in ['yes', 'y', '']:
             print("Download cancelled.")
@@ -455,7 +465,13 @@ class KTUNotesDownloader:
             subject_dir = self.download_dir / clean_name
             subject_dir.mkdir(parents=True, exist_ok=True)
             
-            downloaded = self.scrape_subject(subject_url, subject_name, subject_dir)
+            downloaded = self.scrape_subject(
+                subject_url, 
+                subject_name, 
+                subject_dir, 
+                process_after=process_after,
+                processor_options=processor_options
+            )
             total_downloaded += downloaded
             
             print(f"   📊 Progress: {i}/{len(selected_indices)} subjects")
@@ -479,56 +495,49 @@ class PDFProcessor:
     """Handles PDF post-processing: renaming and hyperlink removal"""
     
     @staticmethod
-    def rename_pdfs_in_directory(directory):
-        """Remove ktunotes patterns from PDF filenames in a directory"""
-        directory = Path(directory)
-        
-        if not directory.exists():
-            print(f"❌ Directory not found: {directory}")
-            return 0
-        
-        renamed_count = 0
-        patterns_to_remove = [
-            r' - Ktunotes\.in',
-            r' - ktunotes\.in',
-            r' -ktunotes\.in',
-            r' - KTUnotes',
-            r' - ktunotes',
-            r'_Ktunotes\.in',
-            r'_ktunotes\.in',
-            r'\(Ktunotes\.in\)',
-            r'\(ktunotes\.in\)',
-        ]
-        
-        for pdf_file in directory.rglob("*.pdf"):
-            try:
-                filename = pdf_file.name
-                new_filename = filename
+    def rename_pdf_file(pdf_file):
+        """Remove ktunotes patterns from a single PDF filename"""
+        try:
+            filename = pdf_file.name
+            new_filename = filename
+            
+            patterns_to_remove = [
+                r' - Ktunotes\.in',
+                r' - ktunotes\.in',
+                r' -ktunotes\.in',
+                r' - KTUnotes',
+                r' - ktunotes',
+                r'_Ktunotes\.in',
+                r'_ktunotes\.in',
+                r'\(Ktunotes\.in\)',
+                r'\(ktunotes\.in\)',
+            ]
+            
+            for pattern in patterns_to_remove:
+                new_filename = re.sub(pattern, '', new_filename, flags=re.IGNORECASE)
+            
+            new_filename = re.sub(r'\s+', ' ', new_filename).strip()
+            new_filename = re.sub(r'\.pdf\.pdf$', '.pdf', new_filename, flags=re.IGNORECASE)
+            
+            if new_filename != filename:
+                new_file_path = pdf_file.parent / new_filename
                 
-                for pattern in patterns_to_remove:
-                    new_filename = re.sub(pattern, '', new_filename, flags=re.IGNORECASE)
-                
-                new_filename = re.sub(r'\s+', ' ', new_filename).strip()
-                new_filename = re.sub(r'\.pdf\.pdf$', '.pdf', new_filename, flags=re.IGNORECASE)
-                
-                if new_filename != filename:
+                counter = 1
+                while new_file_path.exists():
+                    name_part, ext = os.path.splitext(new_filename)
+                    new_filename = f"{name_part}_{counter}{ext}"
                     new_file_path = pdf_file.parent / new_filename
-                    
-                    counter = 1
-                    while new_file_path.exists():
-                        name_part, ext = os.path.splitext(new_filename)
-                        new_filename = f"{name_part}_{counter}{ext}"
-                        new_file_path = pdf_file.parent / new_filename
-                        counter += 1
-                    
-                    pdf_file.rename(new_file_path)
-                    print(f"    📝 Renamed: {filename} → {new_filename}")
-                    renamed_count += 1
-                    
-            except Exception as e:
-                print(f"❌ Error renaming {pdf_file.name}: {e}")
-        
-        return renamed_count
+                    counter += 1
+                
+                pdf_file.rename(new_file_path)
+                print(f"    📝 Renamed: {filename} → {new_filename}")
+                return new_file_path, True
+            else:
+                return pdf_file, False
+                
+        except Exception as e:
+            print(f"❌ Error renaming {pdf_file.name}: {e}")
+            return pdf_file, False
     
     @staticmethod
     def remove_hyperlinks_from_pdf(file_path):
@@ -560,23 +569,17 @@ class PDFProcessor:
             print(f"❌ Error removing hyperlinks from {file_path}: {e}")
             return False
     
-    @staticmethod
-    def process_directory(directory, rename=True, remove_hyperlinks=True):
-        """Process all PDFs in a directory"""
+    def process_single_directory(self, directory, rename=True, remove_hyperlinks=True, recursive=False):
+        """Process all PDFs in a single directory (no recursion)"""
         directory = Path(directory)
         
         if not directory.exists():
             print(f"❌ Directory not found: {directory}")
-            return
+            return 0, 0, 0
         
-        print(f"\n🔧 Processing PDFs in: {directory}")
-        
-        pdf_files = list(directory.rglob("*.pdf"))
+        pdf_files = list(directory.glob("*.pdf"))
         if not pdf_files:
-            print("⚠️  No PDF files found in this directory")
-            return
-        
-        print(f"📄 Found {len(pdf_files)} PDF file(s)")
+            return 0, 0, 0
         
         processed_count = 0
         renamed_count = 0
@@ -584,40 +587,15 @@ class PDFProcessor:
         
         for pdf_file in pdf_files:
             try:
-                print(f"\n   Processing: {pdf_file.name}")
+                current_file = pdf_file
                 
                 if rename:
-                    filename = pdf_file.name
-                    new_filename = filename
-                    patterns_to_remove = [
-                        r' - Ktunotes\.in', r' - ktunotes\.in', r' -ktunotes\.in',
-                        r' - KTUnotes', r' - ktunotes', r'_Ktunotes\.in',
-                        r'_ktunotes\.in', r'\(Ktunotes\.in\)', r'\(ktunotes\.in\)',
-                    ]
-                    
-                    for pattern in patterns_to_remove:
-                        new_filename = re.sub(pattern, '', new_filename, flags=re.IGNORECASE)
-                    
-                    new_filename = re.sub(r'\s+', ' ', new_filename).strip()
-                    new_filename = re.sub(r'\.pdf\.pdf$', '.pdf', new_filename, flags=re.IGNORECASE)
-                    
-                    if new_filename != filename:
-                        new_file_path = pdf_file.parent / new_filename
-                        
-                        counter = 1
-                        while new_file_path.exists():
-                            name_part, ext = os.path.splitext(new_filename)
-                            new_filename = f"{name_part}_{counter}{ext}"
-                            new_file_path = pdf_file.parent / new_filename
-                            counter += 1
-                        
-                        pdf_file.rename(new_file_path)
-                        print(f"      📝 Renamed: {filename} → {new_filename}")
+                    current_file, renamed = self.rename_pdf_file(current_file)
+                    if renamed:
                         renamed_count += 1
-                        pdf_file = new_file_path
                 
                 if remove_hyperlinks:
-                    if PDFProcessor.remove_hyperlinks_from_pdf(pdf_file):
+                    if self.remove_hyperlinks_from_pdf(current_file):
                         hyperlinks_removed += 1
                 
                 processed_count += 1
@@ -625,19 +603,89 @@ class PDFProcessor:
             except Exception as e:
                 print(f"❌ Error processing {pdf_file.name}: {e}")
         
+        return processed_count, renamed_count, hyperlinks_removed
+    
+    def process_directory_recursive(self, directory, rename=True, remove_hyperlinks=True):
+        """Process all PDFs in a directory and all subdirectories"""
+        directory = Path(directory)
+        
+        if not directory.exists():
+            print(f"❌ Directory not found: {directory}")
+            return
+        
+        print(f"\n🔍 Scanning directory recursively: {directory}")
+        
+        # Find all PDF files recursively
+        pdf_files = list(directory.rglob("*.pdf"))
+        if not pdf_files:
+            print("⚠️  No PDF files found in this directory or its subdirectories")
+            return
+        
+        print(f"📄 Found {len(pdf_files)} PDF file(s) in {len(set(f.parent for f in pdf_files))} folder(s)")
+        
+        total_processed = 0
+        total_renamed = 0
+        total_hyperlinks_removed = 0
+        
+        # Group files by directory
+        dir_files = {}
+        for pdf_file in pdf_files:
+            parent_dir = pdf_file.parent
+            if parent_dir not in dir_files:
+                dir_files[parent_dir] = []
+            dir_files[parent_dir].append(pdf_file)
+        
+        # Process each directory
+        for dir_path, files in dir_files.items():
+            print(f"\n{'─'*30}")
+            print(f"📁 Processing: {dir_path.relative_to(directory) if dir_path != directory else '(Main Directory)'}")
+            print(f"   Found {len(files)} PDF file(s)")
+            
+            dir_processed = 0
+            dir_renamed = 0
+            dir_hyperlinks_removed = 0
+            
+            for pdf_file in files:
+                try:
+                    current_file = pdf_file
+                    
+                    if rename:
+                        current_file, renamed = self.rename_pdf_file(current_file)
+                        if renamed:
+                            dir_renamed += 1
+                            total_renamed += 1
+                    
+                    if remove_hyperlinks:
+                        if self.remove_hyperlinks_from_pdf(current_file):
+                            dir_hyperlinks_removed += 1
+                            total_hyperlinks_removed += 1
+                    
+                    dir_processed += 1
+                    total_processed += 1
+                    
+                except Exception as e:
+                    print(f"❌ Error processing {pdf_file.name}: {e}")
+            
+            print(f"   ✅ Processed: {dir_processed} files")
+            if rename:
+                print(f"     📝 Renamed: {dir_renamed} files")
+            if remove_hyperlinks:
+                print(f"     🔗 Hyperlinks removed: {dir_hyperlinks_removed} files")
+        
         print(f"\n{'='*60}")
-        print("✅ PROCESSING COMPLETE!")
+        print("✅ RECURSIVE PROCESSING COMPLETE!")
         print("="*60)
         print(f"📊 Summary:")
-        print(f"  • PDF files processed: {processed_count}")
+        print(f"  • Total folders processed: {len(dir_files)}")
+        print(f"  • Total PDF files processed: {total_processed}")
         if rename:
-            print(f"  • Files renamed: {renamed_count}")
+            print(f"  • Total files renamed: {total_renamed}")
         if remove_hyperlinks:
-            print(f"  • Hyperlinks removed from: {hyperlinks_removed} files")
+            print(f"  • Total hyperlinks removed from: {total_hyperlinks_removed} files")
         print(f"{'='*60}")
     
     def run_processor(self):
-        """Run the PDF processor module"""
+        """Run the PDF processor module with recursive option"""
         print("\n" + "="*60)
         print("🔧 PDF POST-PROCESSOR")
         print("="*60)
@@ -668,23 +716,77 @@ class PDFProcessor:
             print("⚠️  No processing options selected. Nothing to do.")
             return
         
+        print("\n" + "-"*60)
+        print("📁 PROCESSING SCOPE")
+        print("-"*60)
+        print("1. Process only the selected directory")
+        print("2. Process recursively (all subdirectories)")
+        
+        while True:
+            scope_choice = input("\nSelect processing scope (1 or 2): ").strip()
+            
+            if scope_choice == '1':
+                recursive = False
+                break
+            elif scope_choice == '2':
+                recursive = True
+                break
+            else:
+                print("❌ Invalid choice. Please enter 1 or 2.")
+        
         print(f"\n📁 Directory: {directory.absolute()}")
         print(f"⚙️  Options:")
         if rename:
             print("  • Rename files: ✅ ENABLED")
         if remove_hyperlinks:
             print("  • Remove hyperlinks: ✅ ENABLED")
+        if recursive:
+            print("  • Processing scope: 🔄 RECURSIVE (all subdirectories)")
+        else:
+            print("  • Processing scope: 📂 CURRENT DIRECTORY ONLY")
         
         confirm = input("\nStart processing? (yes/no): ").strip().lower()
         if confirm not in ['yes', 'y', '']:
             print("Processing cancelled.")
             return
         
-        self.process_directory(directory, rename, remove_hyperlinks)
+        if recursive:
+            self.process_directory_recursive(directory, rename, remove_hyperlinks)
+        else:
+            print(f"\n🔧 Processing directory: {directory}")
+            processed, renamed, hyperlinks_removed = self.process_single_directory(
+                directory, rename, remove_hyperlinks
+            )
+            
+            print(f"\n{'='*60}")
+            print("✅ PROCESSING COMPLETE!")
+            print("="*60)
+            print(f"📊 Summary:")
+            print(f"  • PDF files processed: {processed}")
+            if rename:
+                print(f"  • Files renamed: {renamed}")
+            if remove_hyperlinks:
+                print(f"  • Hyperlinks removed from: {hyperlinks_removed} files")
+            print(f"{'='*60}")
 
 
 class AllInOneKTUScraper:
     """Main orchestrator that combines downloader and processor"""
+    
+    @staticmethod
+    def get_processor_options():
+        """Get PDF processing options from user"""
+        print("\n" + "-"*60)
+        print("⚙️  PDF PROCESSING OPTIONS")
+        print("-"*60)
+        
+        rename_choice = input("Remove 'Ktunotes.in' from filenames? (yes/no, default: yes): ").strip().lower()
+        rename = rename_choice in ['yes', 'y', '']
+        
+        hyperlinks_choice = input("Remove hyperlinks from PDFs? (yes/no, default: no): ").strip().lower()
+        remove_hyperlinks = hyperlinks_choice in ['yes', 'y']
+        
+        return {'rename': rename, 'remove_hyperlinks': remove_hyperlinks}
     
     @staticmethod
     def main_menu():
@@ -693,9 +795,9 @@ class AllInOneKTUScraper:
         print("🎓 KTU NOTES MANAGER")
         print("="*60)
         print("\nWhat would you like to do?")
-        print("1. 📥 Download KTU Notes")
+        print("1. 📥 Download KTU Notes (Download Only)")
         print("2. 🔧 Process Existing PDFs (Rename & Remove Hyperlinks)")
-        print("3. 📥 + 🔧 Download AND Process")
+        print("3. 📥 + 🔧 Download AND Process (Auto-process after each folder)")
         print("4. 🚪 Exit")
         
         while True:
@@ -708,50 +810,32 @@ class AllInOneKTUScraper:
                 break
                 
             elif choice == '2':
-                # Process only
+                # Process only with recursive option
                 processor = PDFProcessor()
                 processor.run_processor()
                 break
                 
             elif choice == '3':
-                # Download and process
+                # Download and process with auto-processing after each folder
                 print("\n" + "="*60)
                 print("📥 + 🔧 DOWNLOAD AND PROCESS")
                 print("="*60)
+                print("Files will be processed immediately after each folder is downloaded.\n")
                 
-                # Step 1: Download
-                print("\n📥 STEP 1: DOWNLOADING")
-                print("-"*40)
-                downloader = KTUNotesDownloader()
-                downloader.run_downloader()
+                # Get processing options
+                processor_options = AllInOneKTUScraper.get_processor_options()
                 
-                # Step 2: Ask for processing options
-                print("\n" + "="*60)
-                print("🔧 STEP 2: POST-PROCESSING")
-                print("="*60)
-                
-                process_dir = input(f"\nEnter directory to process (default: {downloader.download_dir}): ").strip()
-                if not process_dir:
-                    process_dir = downloader.download_dir
-                
-                processor = PDFProcessor()
-                
-                print("\n" + "-"*60)
-                print("⚙️  PROCESSING OPTIONS")
-                print("-"*60)
-                
-                rename_choice = input("Remove 'Ktunotes.in' from filenames? (yes/no, default: yes): ").strip().lower()
-                rename = rename_choice in ['yes', 'y', '']
-                
-                hyperlinks_choice = input("Remove hyperlinks from PDFs? (yes/no, default: no): ").strip().lower()
-                remove_hyperlinks = hyperlinks_choice in ['yes', 'y']
-                
-                if rename or remove_hyperlinks:
-                    confirm = input("\nStart post-processing? (yes/no): ").strip().lower()
-                    if confirm in ['yes', 'y', '']:
-                        processor.process_directory(process_dir, rename, remove_hyperlinks)
+                if not processor_options['rename'] and not processor_options['remove_hyperlinks']:
+                    print("⚠️  No processing options selected. Switching to download-only mode.")
+                    downloader = KTUNotesDownloader()
+                    downloader.run_downloader()
                 else:
-                    print("⚠️  No processing options selected. Skipping post-processing.")
+                    # Run downloader with auto-processing
+                    downloader = KTUNotesDownloader()
+                    downloader.run_downloader(
+                        process_after=True,
+                        processor_options=processor_options
+                    )
                 
                 break
                 
@@ -764,8 +848,10 @@ class AllInOneKTUScraper:
 
 
 def main():
-    print("\n🎓 KTU NOTES MANAGER - MODULAR VERSION")
-    print("   Downloader and PDF Processor\n")
+    print("\n🎓 KTU NOTES MANAGER - ENHANCED VERSION")
+    print("   • Modular architecture")
+    print("   • Recursive processing")
+    print("   • Auto-processing after download\n")
     
     # Check for PyMuPDF
     try:
