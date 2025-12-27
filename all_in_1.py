@@ -76,11 +76,36 @@ class KTUNotesDownloader:
     
     def extract_module_info_from_context(self, html_content, file_id, link_text=""):
         """Extract module information from context for better filename"""
+        # Check link text first
+        if link_text:
+            # Common patterns in link text
+            patterns = [
+                r'(?:Module|Mod|MODULE|MOD|M)\s*[:\-]?\s*(\d+)[^<]*',
+                r'(?:Module|Mod|MODULE|MOD|M)\s*[:\-]?\s*([IVXivx]+)[^<]*',
+                r'(?:Module|Mod)\s*[:\-]?\s*(\d+)\s*[-–]\s*[^<]*',  # Module 1 - Topic
+                r'Module\s*(\d+)\s*[-–]\s*[^<]*',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, link_text, re.IGNORECASE)
+                if match:
+                    module_num = match.group(1)
+                    roman_map = {'I': '1', 'II': '2', 'III': '3', 'IV': '4', 'V': '5',
+                                 'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5',
+                                 'vi': '6', 'vii': '7', 'viii': '8', 'ix': '9', 'x': '10'}
+                    module_num = roman_map.get(module_num.upper(), module_num)
+                    return f"Module_{module_num.zfill(2)}"
+        
+        # Search in surrounding context
         idx = html_content.find(file_id)
         if idx != -1:
-            context_start = max(0, idx - 300)
-            context_end = min(len(html_content), idx + 150)
+            context_start = max(0, idx - 500)
+            context_end = min(len(html_content), idx + 300)
             context = html_content[context_start:context_end]
+            
+            # Remove HTML tags for cleaner search
+            soup_context = BeautifulSoup(context, 'html.parser')
+            clean_context = soup_context.get_text()
             
             module_patterns = [
                 r'Module\s*[:\-]?\s*(\d+)[^<]*',
@@ -89,25 +114,19 @@ class KTUNotesDownloader:
                 r'MODULE\s*[:\-]?\s*(\d+)[^<]*',
                 r'Module\s*([IVXivx]+)[^<]*',
                 r'Mod\s*([IVXivx]+)[^<]*',
+                r'Unit\s*[:\-]?\s*(\d+)[^<]*',
+                r'UNIT\s*[:\-]?\s*(\d+)[^<]*',
+                r'Lecture\s*[:\-]?\s*(\d+)[^<]*',
+                r'LECTURE\s*[:\-]?\s*(\d+)[^<]*',
             ]
             
             for pattern in module_patterns:
-                match = re.search(pattern, context, re.IGNORECASE)
+                match = re.search(pattern, clean_context, re.IGNORECASE)
                 if match:
                     module_num = match.group(1)
                     roman_map = {'I': '1', 'II': '2', 'III': '3', 'IV': '4', 'V': '5',
-                                 'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5'}
-                    module_num = roman_map.get(module_num.upper(), module_num)
-                    return f"Module_{module_num.zfill(2)}"
-        
-        if link_text:
-            link_lower = link_text.lower()
-            if 'module' in link_lower or 'mod' in link_lower:
-                num_match = re.search(r'(\d+|i{1,3}|iv|v)', link_text, re.IGNORECASE)
-                if num_match:
-                    module_num = num_match.group(1)
-                    roman_map = {'I': '1', 'II': '2', 'III': '3', 'IV': '4', 'V': '5',
-                                 'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5'}
+                                 'i': '1', 'ii': '2', 'iii': '3', 'iv': '4', 'v': '5',
+                                 'vi': '6', 'vii': '7', 'viii': '8', 'ix': '9', 'x': '10'}
                     module_num = roman_map.get(module_num.upper(), module_num)
                     return f"Module_{module_num.zfill(2)}"
         
@@ -188,8 +207,39 @@ class KTUNotesDownloader:
             print(f"❌ Error downloading {url}: {e}")
             return False
     
+    def is_similar_subject(self, subject1, subject2):
+        """Check if two subject names are similar"""
+        # Remove common words and compare
+        common_words = ['and', 'the', 'in', 'of', 'for', 'to', '&', '-', '_']
+        
+        def clean_text(text):
+            text = text.lower()
+            for word in common_words:
+                text = text.replace(word, ' ')
+            # Remove special characters
+            text = re.sub(r'[^a-z0-9\s]', '', text)
+            return re.sub(r'\s+', ' ', text).strip()
+        
+        clean1 = clean_text(subject1)
+        clean2 = clean_text(subject2)
+        
+        # Check if one contains the other or they share significant words
+        words1 = set(clean1.split())
+        words2 = set(clean2.split())
+        
+        # Check for significant overlap
+        common_words = words1.intersection(words2)
+        if len(common_words) >= 2:  # At least 2 common words
+            return True
+            
+        # Check if one is substring of the other
+        if (clean1 in clean2 or clean2 in clean1) and len(clean1) > 3 and len(clean2) > 3:
+            return True
+            
+        return False
+    
     def get_subject_links(self, semester_url):
-        """Extract ALL subject links from a semester page"""
+        """Extract ALL subject links from a semester page - handles both notes and question papers"""
         try:
             print(f"\n🔍 Fetching subjects from: {semester_url}")
             response = self.session.get(semester_url, timeout=15)
@@ -198,46 +248,101 @@ class KTUNotesDownloader:
             
             subject_links = []
             
-            buttons = soup.find_all('a', class_='elementor-button')
+            # METHOD 1: Look for elementor buttons (works for both notes and question papers)
+            buttons = soup.find_all('a', class_=lambda x: x and 'elementor-button' in x)
+            
             for button in buttons:
                 href = button.get('href')
-                if href:
-                    if '/ktu-' in href and ('-notes-' in href or 'notes/' in href):
-                        text_element = button.find('span', class_='elementor-button-text')
-                        if text_element:
-                            subject_name = text_element.get_text(strip=True)
-                            subject_name = re.sub(r'[<>:"/\\|?*&]', '_', subject_name)
-                            subject_name = re.sub(r'\s+', ' ', subject_name).strip()
-                            exclude_keywords = ['CURRICULUM', 'SYLLABUS', 'QUESTION PAPER', 'EXAM', 'TIMETABLE']
-                            if (len(subject_name) > 5 and 
-                                not any(keyword in subject_name.upper() for keyword in exclude_keywords)):
-                                full_url = urljoin(semester_url, href)
-                                subject_links.append((full_url, subject_name))
-            
-            content_sections = soup.select('.elementor-widget-wrap, .elementor-section')
-            for section in content_sections:
-                links = section.find_all('a', href=True)
-                for link in links:
-                    href = link.get('href')
-                    text = link.get_text(strip=True)
+                if not href:
+                    continue
                     
-                    if (href and text and len(text) > 5 and
-                        ('/ktu-' in href or 'notes' in href.lower()) and
-                        not any(excl in text.upper() for excl in ['CURRICULUM', 'SYLLABUS', 'QUESTION'])):
-                        
-                        if not any(term in text.lower() for term in ['home', 'about', 'contact', 'privacy']):
-                            full_url = urljoin(semester_url, href)
-                            if not any(url == full_url for url, _ in subject_links):
-                                clean_name = re.sub(r'[<>:"/\\|?*&]', '_', text)
-                                clean_name = re.sub(r'\s+', ' ', clean_name).strip()
-                                subject_links.append((full_url, clean_name))
+                # Get button text
+                text_element = button.find('span', class_='elementor-button-text')
+                if not text_element:
+                    continue
+                    
+                subject_name = text_element.get_text(strip=True)
+                
+                # Clean up the subject name
+                subject_name = re.sub(r'[<>:"/\\|?*&]', '_', subject_name)
+                subject_name = re.sub(r'\s+', ' ', subject_name).strip()
+                
+                # Skip if too short
+                if len(subject_name) < 3:
+                    continue
+                    
+                # Skip unwanted buttons
+                exclude_keywords = ['HOME', 'ABOUT', 'CONTACT', 'PRIVACY', 'MORE', 'UPLOAD']
+                if any(keyword in subject_name.upper() for keyword in exclude_keywords):
+                    continue
+                
+                # Handle different types of links
+                if 'drive.google.com' in href:
+                    # This is a direct Google Drive link on a question papers page
+                    # We'll create a subject entry that points to the current page
+                    # The actual downloading will happen in scrape_subject
+                    subject_links.append((semester_url, subject_name))
+                elif '/ktu-' in href or 'notes' in href.lower() or 'question' in href.lower():
+                    # This is a link to another page (notes or question papers)
+                    full_url = urljoin(semester_url, href)
+                    
+                    # Check if it's a syllabus or curriculum page
+                    if not any(keyword in subject_name.upper() 
+                              for keyword in ['CURRICULUM', 'SYLLABUS', 'TIMETABLE']):
+                        subject_links.append((full_url, subject_name))
             
-            seen = set()
+            # METHOD 2: Look for other subject links in the content
+            if len(subject_links) <= 1:  # If we didn't find many via buttons
+                content_sections = soup.select('.elementor-widget-wrap, .elementor-section, .post_content')
+                for section in content_sections:
+                    links = section.find_all('a', href=True)
+                    for link in links:
+                        href = link['href']
+                        text = link.get_text(strip=True)
+                        
+                        if not text or len(text) < 5:
+                            continue
+                        
+                        # Check if this looks like a subject link
+                        if ('/ktu-' in href or 
+                            'notes' in href.lower() or 
+                            'question' in href.lower() or
+                            'drive.google.com' in href):
+                            
+                            # Skip unwanted links
+                            if any(excl in text.upper() for excl in 
+                                  ['CURRICULUM', 'SYLLABUS', 'QUESTION BANK', 'HOME', 'ABOUT']):
+                                continue
+                            
+                            clean_name = re.sub(r'[<>:"/\\|?*&]', '_', text)
+                            clean_name = re.sub(r'\s+', ' ', clean_name).strip()
+                            
+                            if 'drive.google.com' in href:
+                                # Direct Google Drive link
+                                subject_links.append((semester_url, clean_name))
+                            else:
+                                # Link to another page
+                                full_url = urljoin(semester_url, href)
+                                if not any(url == full_url for url, _ in subject_links):
+                                    subject_links.append((full_url, clean_name))
+            
+            # Remove duplicates by subject name (case-insensitive)
+            seen_names = set()
             unique_links = []
+            
             for link_url, link_text in subject_links:
-                if link_url not in seen:
-                    seen.add(link_url)
+                # Normalize the name for comparison
+                normalized_name = re.sub(r'\s+', ' ', link_text.lower()).strip()
+                
+                if normalized_name not in seen_names and link_text:
+                    seen_names.add(normalized_name)
                     unique_links.append((link_url, link_text))
+            
+            print(f"   📊 Found {len(unique_links)} subjects:")
+            for i, (url, name) in enumerate(unique_links, 1):
+                print(f"     {i}. {name}")
+                if 'drive.google.com' not in url and url != semester_url:
+                    print(f"        🔗 {url}")
             
             return unique_links
             
@@ -255,7 +360,24 @@ class KTUNotesDownloader:
             
             drive_links = []
             
-            for link in soup.find_all('a', href=True):
+            print(f"🔍 Looking for drive links on: {url}")
+            
+            # CASE 1: Find links in button widgets (common pattern for single links)
+            elementor_buttons = soup.find_all('a', class_=lambda x: x and 'elementor-button' in x)
+            for button in elementor_buttons:
+                href = button.get('href')
+                link_text = button.get_text(strip=True)
+                
+                if href and 'drive.google.com' in href:
+                    file_id = self.extract_file_id(href)
+                    if file_id:
+                        drive_url = f"https://drive.google.com/file/d/{file_id}/view"
+                        print(f"   ✅ Found drive link in elementor button: {link_text[:50]}... (ID: {file_id[:8]})")
+                        drive_links.append((drive_url, file_id, link_text))
+            
+            # CASE 2: Check all links on the page
+            all_links = soup.find_all('a', href=True)
+            for link in all_links:
                 href = link['href']
                 link_text = link.get_text(strip=True)
                 
@@ -263,20 +385,26 @@ class KTUNotesDownloader:
                     file_id = self.extract_file_id(href)
                     if file_id:
                         drive_url = f"https://drive.google.com/file/d/{file_id}/view"
-                        if not any(fid == file_id for _, fid, _ in drive_links):
+                        # Check if this exact combination (file_id + link_text) already exists
+                        if not any(fid == file_id and text == link_text for _, fid, text in drive_links):
+                            print(f"   ✅ Found drive link: {link_text[:50]}... (ID: {file_id[:8]})")
                             drive_links.append((drive_url, file_id, link_text))
             
-            patterns = [
-                r'drive\.google\.com/file/d/([a-zA-Z0-9_-]+)',
-                r'drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)',
-                r'drive\.google\.com/uc\?[^"\'>]*id=([a-zA-Z0-9_-]+)',
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, html_content)
-                for file_id in matches:
-                    drive_url = f"https://drive.google.com/file/d/{file_id}/view"
-                    if not any(fid == file_id for _, fid, _ in drive_links):
+            # CASE 3: Search in text content for drive URLs (fallback)
+            if not drive_links:
+                print(f"   🔍 Searching text content for drive URLs...")
+                patterns = [
+                    r'drive\.google\.com/file/d/([a-zA-Z0-9_-]+)',
+                    r'drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)',
+                    r'drive\.google\.com/uc\?[^"\'>]*id=([a-zA-Z0-9_-]+)',
+                    r'drive\.google\.com/drive/(?:folders|u/0)?/([a-zA-Z0-9_-]+)',
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, html_content)
+                    for file_id in matches:
+                        drive_url = f"https://drive.google.com/file/d/{file_id}/view"
+                        # Try to find context around the file_id
                         link_text = ""
                         idx = html_content.find(file_id)
                         if idx != -1:
@@ -284,13 +412,36 @@ class KTUNotesDownloader:
                             end = min(len(html_content), idx + 150)
                             context = html_content[start:end]
                             soup_context = BeautifulSoup(context, 'html.parser')
+                            
+                            # Try to find link text
                             link_elem = soup_context.find('a', href=lambda x: x and file_id in x)
                             if link_elem:
                                 link_text = link_elem.get_text(strip=True)
+                            else:
+                                # Extract some text from the context
+                                all_text = soup_context.get_text(strip=True)
+                                link_text = all_text[:100] if all_text else f"Document_{file_id[:8]}"
                         
-                        drive_links.append((drive_url, file_id, link_text))
+                        if not any(fid == file_id for _, fid, _ in drive_links):
+                            print(f"   ✅ Found drive link in text: {link_text[:50]}... (ID: {file_id[:8]})")
+                            drive_links.append((drive_url, file_id, link_text or f"Document_{file_id[:8]}"))
             
-            return drive_links, html_content
+            # Remove duplicates by file_id AND link_text
+            unique_drive_links = []
+            seen_combinations = set()
+            for link in drive_links:
+                url, file_id, text = link
+                combination = f"{file_id}_{text}"
+                if combination not in seen_combinations:
+                    seen_combinations.add(combination)
+                    unique_drive_links.append(link)
+            
+            # Sort links by text (helps with module order)
+            unique_drive_links.sort(key=lambda x: x[2].lower())
+            
+            print(f"   📊 Total unique drive links found: {len(unique_drive_links)}")
+            
+            return unique_drive_links, html_content
             
         except Exception as e:
             print(f"❌ Error finding drive links on {url}: {e}")
@@ -301,42 +452,103 @@ class KTUNotesDownloader:
         print(f"\n📚 Processing: {subject_name}")
         print(f"   🔗 URL: {subject_url}")
         
+        # First, check if this subject_name matches any button text on the page
         drive_links, html_content = self.find_drive_links_on_page(subject_url)
         
         if not drive_links:
             print(f"   ⚠️  No Google Drive links found on this page")
             return 0
         
-        print(f"   📄 Found {len(drive_links)} Google Drive link(s)")
+        # Filter links by subject name if we're on a multi-subject page
+        filtered_drive_links = []
         
-        downloaded_count = 0
-        for i, (drive_url, file_id, link_text) in enumerate(drive_links, 1):
-            print(f"   📥 Processing link {i}/{len(drive_links)}")
+        # Try to match the subject name with link texts
+        subject_name_lower = subject_name.lower()
+        for drive_url, file_id, link_text in drive_links:
+            link_text_lower = link_text.lower()
             
-            module_info = self.extract_module_info_from_context(html_content, file_id, link_text)
-            if module_info:
-                filename = f"{module_info}.pdf"
-            else:
-                filename = f"Document_{i:02d}.pdf"
+            # Check if this link belongs to our subject
+            if (subject_name_lower in link_text_lower or 
+                link_text_lower in subject_name_lower or
+                self.is_similar_subject(subject_name, link_text)):
+                filtered_drive_links.append((drive_url, file_id, link_text))
+        
+        # If we didn't find matches, use all links (for single-subject pages)
+        if not filtered_drive_links:
+            filtered_drive_links = drive_links
+            print(f"   📄 Found {len(drive_links)} Google Drive link(s)")
+        else:
+            print(f"   📄 Found {len(filtered_drive_links)} Google Drive link(s) for '{subject_name}'")
+        
+# Special handling for single document
+        if len(filtered_drive_links) == 1:
+            print(f"   ⚙️  Single document detected")
+            drive_url, file_id, link_text = filtered_drive_links[0]
             
-            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            save_path = os.path.join(subject_dir, filename)
+            # Use subject name for filename
+            clean_subject_name = re.sub(r'[<>:"/\\|?*]', '_', subject_name)
+            clean_subject_name = re.sub(r'\s+', ' ', clean_subject_name).strip()
+            
+            # Check if it ends with .pdf, if not add it
+            if not clean_subject_name.lower().endswith('.pdf'):
+                clean_subject_name += '.pdf'
+            
+            # Limit filename length
+            if len(clean_subject_name) > 100:
+                clean_subject_name = clean_subject_name[:95] + '.pdf'
+            
+            save_path = os.path.join(subject_dir, clean_subject_name)
             
             if os.path.exists(save_path):
-                print(f"   ⏭️  Skipping (already exists): {filename}")
-                downloaded_count += 1
-                continue
+                print(f"   ⏭️  Skipping (already exists): {clean_subject_name}")
+                downloaded_count = 1  # <-- CHANGED: Use variable instead of return
+            else:
+                time.sleep(1.5)
+                result = self.download_drive_pdf(drive_url, save_path, html_content, link_text)
+                downloaded_count = 1 if result else 0  # <-- CHANGED: Use variable instead of return
             
-            time.sleep(1.5)
-            
-            result = self.download_drive_pdf(drive_url, save_path, html_content, link_text)
-            
-            if result:
-                downloaded_count += 1
+        else:
+            # Multiple documents
+            downloaded_count = 0
+            for i, (drive_url, file_id, link_text) in enumerate(filtered_drive_links, 1):
+                print(f"   📥 Processing link {i}/{len(filtered_drive_links)}")
+                
+                # Try to extract module info
+                module_info = self.extract_module_info_from_context(html_content, file_id, link_text)
+                
+                if module_info:
+                    filename = f"{module_info}.pdf"
+                elif link_text and len(link_text) > 3:
+                    # Use link text as filename
+                    clean_text = re.sub(r'[<>:"/\\|?*]', '_', link_text)
+                    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                    if len(clean_text) > 50:
+                        clean_text = clean_text[:47] + '...'
+                    filename = f"{clean_text}.pdf"
+                else:
+                    filename = f"Document_{i:02d}.pdf"
+                
+                # Ensure it ends with .pdf
+                if not filename.lower().endswith('.pdf'):
+                    filename += '.pdf'
+                
+                filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                save_path = os.path.join(subject_dir, filename)
+                
+                if os.path.exists(save_path):
+                    print(f"   ⏭️  Skipping (already exists): {filename}")
+                    downloaded_count += 1
+                    continue
+                
+                time.sleep(1.5)
+                
+                result = self.download_drive_pdf(drive_url, save_path, html_content, link_text)
+                
+                if result:
+                    downloaded_count += 1
         
         # Process after download if requested
         if process_after and downloaded_count > 0 and processor_options:
-            from PDFProcessor import PDFProcessor  # Import here to avoid circular dependency
             processor = PDFProcessor()
             print(f"\n   🔧 Processing downloaded files in: {subject_dir}")
             processor.process_single_directory(subject_dir, **processor_options)
@@ -853,7 +1065,9 @@ def main():
     print("\n🎓 KTU NOTES MANAGER - ENHANCED VERSION")
     print("   • Modular architecture")
     print("   • Recursive processing")
-    print("   • Auto-processing after download\n")
+    print("   • Auto-processing after download")
+    print("   • Single document support")
+    print("   • Question papers support\n")
     
     # Check for PyMuPDF
     try:
